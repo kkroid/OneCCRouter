@@ -5,6 +5,7 @@
 9router-data/
 
 # GitHub Copilot token
+copilot-anthropic-proxy/github_token
 data/
 
 # 依赖

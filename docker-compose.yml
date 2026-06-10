@@ -13,7 +13,7 @@ services:
     ports:
       - "4142:4142"
     volumes:
-      - ./data/copilot-api:/gh-token:ro
+      - ./copilot-anthropic-proxy/github_token:/gh-token/github_token:ro
       - ./copilot-anthropic-proxy/models.conf:/app/models.conf:ro
     networks:
       - internal
