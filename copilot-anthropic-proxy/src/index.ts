@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
+import { serve } from "@hono/node-server";
 import { readFile } from "node:fs/promises";
 
 import { getToken, getApiBase } from "./auth";
@@ -164,9 +165,8 @@ async function main() {
   console.log(`   Health:   GET /health\n`);
 }
 
-main();
-
-export default {
-  port: PORT,
-  fetch: app.fetch,
-};
+main().then(() => {
+  serve({ fetch: app.fetch, port: PORT }, (info) => {
+    console.log(`🚀 Proxy listening on http://localhost:${info.port}`);
+  });
+});
