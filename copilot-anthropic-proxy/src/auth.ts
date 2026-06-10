@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, access } from "node:fs/promises";
 
 let cachedToken: string | null = null;
 let cachedApiBase: string | null = null;
@@ -45,5 +45,17 @@ export async function getToken(): Promise<string> {
 
 export function getApiBase(): string {
   return cachedApiBase || "https://api.githubcopilot.com";
+}
+
+export async function checkTokenAvailable(): Promise<boolean> {
+  const path = process.env.GITHUB_TOKEN_FILE;
+  if (!path) return false;
+  try {
+    await access(path);
+    const content = await readFile(path, "utf-8").then(c => c.trim());
+    return content.length > 0;
+  } catch {
+    return false;
+  }
 }
 

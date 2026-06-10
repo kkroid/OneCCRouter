@@ -4,7 +4,7 @@ import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
 import { readFile } from "node:fs/promises";
 
-import { getToken, getApiBase } from "./auth";
+import { getToken, getApiBase, checkTokenAvailable } from "./auth";
 import {
   translateRequest, translateResponse, translateStreamChunk,
   setAllowedModels, getAllowedModels, type StreamContext,
@@ -160,13 +160,14 @@ app.post("/v1/messages", messagesHandler);
 async function main() {
   await loadModelList();
 
-  console.log(`\n🚀 Copilot Anthropic Proxy listening on http://localhost:${PORT}`);
-  console.log(`   Endpoint: POST /v1/messages`);
-  console.log(`   Health:   GET /health\n`);
+  const tokenReady = await checkTokenAvailable();
+  if (!tokenReady) {
+    console.log("\n⚠  GitHub Copilot token 未设置。");
+    console.log("   运行以下命令完成设备登录：");
+    console.log("   podman run --rm -it -v ./copilot-anthropic-proxy/github_token:/root/.local/share/copilot-api/github_token ghcr.io/ericc-ch/copilot-api:latest bun run auth.js\n");
+  }
 }
 
 main().then(() => {
-  serve({ fetch: app.fetch, port: PORT }, (info) => {
-    console.log(`🚀 Proxy listening on http://localhost:${info.port}`);
-  });
+  serve({ fetch: app.fetch, port: PORT });
 });
