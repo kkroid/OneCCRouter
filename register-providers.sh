@@ -1,65 +1,83 @@
 #!/bin/sh
 set -e
-echo "=== Registering Anthropic Providers ==="
+
+echo "=== Registering Providers ==="
 
 bun -e "
-const API='http://9router:3456/api';
-const DS=process.env.DEEPSEEK_API_KEY||'sk-placeholder';
-let C='';
+import { readFileSync, writeFileSync } from 'fs';
 
-async function post(url,body) {
-  const h={'Content-Type':'application/json'};
-  if(C) h.Cookie=C;
-  const r=await fetch(url,{method:'POST',headers:h,body:body?JSON.stringify(body):undefined});
-  const sc=r.headers.get('set-cookie'); if(sc) C=sc.split(';')[0];
-  const txt=await r.text().catch(()=>'');
-  const data=r.ok ? JSON.parse(txt) : {error:txt,status:r.status};
-  return {ok:r.ok,data};
+const API = 'http://9router:3456/api';
+const providers = JSON.parse(readFileSync('/providers.json', 'utf-8'));
+let cookie = '';
+
+async function api(method, url, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (cookie) headers['Cookie'] = cookie;
+  const opts = { method, headers };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  const sc = res.headers.get('set-cookie');
+  if (sc) cookie = sc.split(';')[0];
+  const text = await res.text().catch(() => '');
+  try { return { ok: res.ok, data: JSON.parse(text) }; }
+  catch { return { ok: res.ok, data: text, status: res.status }; }
 }
-async function del(url) {
-  const h={'Content-Type':'application/json'}; if(C) h.Cookie=C;
-  const r=await fetch(url,{method:'DELETE',headers:h});
-  return r.ok;
-}
+const post = (url, body) => api('POST', url, body);
+const get = (url) => api('GET', url);
+const del = (url) => api('DELETE', url);
 
 // Login
-await post(API+'/auth/login',{password:'123456'});
+await post(API + '/auth/login', { password: '123456' });
 
-// Delete old nodes (will fail if none exist, that's ok)
-const old=await post(API+'/provider-nodes',null);
-// Need GET for listing
-async function get(url) {
-  const h={'Content-Type':'application/json'}; if(C) h.Cookie=C;
-  const r=await fetch(url,{method:'GET',headers:h});
-  return r.ok ? await r.json() : null;
-}
-const nodes=await get(API+'/provider-nodes');
-if(nodes?.nodes) {
-  for(const n of nodes.nodes) {
-    if(n.prefix==='ds' || n.prefix==='cp') {
-      await del(API+'/provider-nodes/'+n.id);
+// Delete old nodes
+const existing = await get(API + '/provider-nodes');
+const knownPrefixes = providers.map(p => p.prefix);
+if (existing?.nodes) {
+  for (const n of existing.nodes) {
+    if (knownPrefixes.includes(n.prefix)) {
+      await del(API + '/provider-nodes/' + n.id);
       console.log('Deleted old node:', n.prefix);
     }
   }
 }
 
-// Create new nodes
-const ds=await post(API+'/provider-nodes',{name:'DeepSeek',prefix:'ds',baseUrl:'https://api.deepseek.com/anthropic',type:'anthropic-compatible'});
-console.log('DS node:', JSON.stringify(ds.data));
+// Register each provider
+const models = [];
+for (const p of providers) {
+  const r = await post(API + '/provider-nodes', {
+    name: p.name,
+    prefix: p.prefix,
+    baseUrl: p.baseUrl,
+    type: 'anthropic-compatible'
+  });
+  console.log(p.prefix + ' node:', JSON.stringify(r.data));
 
-const cp=await post(API+'/provider-nodes',{name:'Copilot Claude',prefix:'cp',baseUrl:'http://copilot-anthropic:4142',type:'anthropic-compatible'});
-console.log('CP node:', JSON.stringify(cp.data));
+  const nodeId = r.data?.node?.id;
+  if (nodeId) {
+    const apiKey = p.apiKey || (p.apiKeyEnv ? (process.env[p.apiKeyEnv] || '') : '');
+    const c = await post(API + '/providers', {
+      provider: nodeId,
+      name: p.name,
+      apiKey,
+      label: p.name
+    });
+    console.log(p.prefix + ' conn:', c.ok ? 'OK' : 'FAIL');
+  }
 
-// Create connections
-const dsId=ds.data?.node?.id;
-if(dsId){
-  const c=await post(API+'/providers',{provider:dsId,name:'DeepSeek',apiKey:DS,label:'DeepSeek'});
-  console.log('DS conn:', JSON.stringify(c.data));
+  for (const m of (p.models || [])) {
+    models.push({ id: p.prefix + '/' + m, name: p.name + ' ' + m });
+  }
 }
-const cpId=cp.data?.node?.id;
-if(cpId){
-  const c=await post(API+'/providers',{provider:cpId,name:'Copilot Claude',apiKey:'not-needed',label:'Copilot Claude'});
-  console.log('CP conn:', JSON.stringify(c.data));
-}
+
+// Generate Claude Code settings
+const settings = {
+  apiKey: 'x',
+  baseUrl: 'http://localhost:3456/v1',
+  model: models[0]?.id || '',
+  _availableModels: models
+};
+writeFileSync('/out/claude-code-settings.json', JSON.stringify(settings, null, 2) + '\n');
+console.log('\nGenerated claude-code-settings.json with', models.length, 'models');
+
 console.log('=== Done ===');
 "

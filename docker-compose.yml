@@ -34,24 +34,6 @@ services:
     volumes:
       - 9router-data:/app/data
     environment:
-      # 通过环境变量注入路由规则，${DEEPSEEK_API_KEY} 自动从 .env 读取
-      PROVIDERS: >
-        [
-          {
-            "name": "deepseek",
-            "api_base_url": "https://api.deepseek.com/anthropic",
-            "api_key": "${DEEPSEEK_API_KEY}",
-            "format": "claude",
-            "models": ["deepseek-v4-pro", "deepseek-v4-flash"]
-          },
-          {
-            "name": "copilot-claude",
-            "api_base_url": "http://copilot-anthropic:4142",
-            "api_key": "not-needed",
-            "format": "claude",
-            "models": ["claude-opus-4.8", "claude-fable-5"]
-          }
-        ]
       PORT: "3456"
     ports:
       - "3456:3456"
@@ -70,10 +52,12 @@ services:
     depends_on:
       9router:
         condition: service_healthy
-    environment:
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+    env_file:
+      - .env
     volumes:
       - ./register-providers.sh:/register.sh:ro
+      - ./providers.json:/providers.json:ro
+      - ./out:/out
     entrypoint: ["/bin/sh", "/register.sh"]
     networks:
       - internal
