@@ -62,10 +62,6 @@ GITHUB_TOKEN=ghu_xxxxxxxx
 
 ### 3. 获取 GitHub Copilot Token
 
-> **注意**：Copilot API 需要的是 **设备 OAuth Token**（`ghu_` 前缀），不是 GitHub Personal Access Token（`ghp_` 前缀）。两者是不同的认证体系，PAT 无法用于 Copilot API。
-
-使用 copilot-api 完成设备认证（一次性）：
-
 ```bash
 podman run --rm -it \
   -v ./copilot-anthropic-proxy/github_token:/root/.local/share/copilot-api/github_token \
@@ -73,7 +69,7 @@ podman run --rm -it \
   bun run auth.js
 ```
 
-按提示打开 GitHub 验证页面，完成后 token 会自动保存到 `copilot-anthropic-proxy/github_token`。
+按提示打开 GitHub 验证页面，完成后 token 自动保存到 `copilot-anthropic-proxy/github_token`。
 
 ### 4. 启动服务
 

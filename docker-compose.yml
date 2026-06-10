@@ -28,6 +28,9 @@ services:
     image: ghcr.io/decolua/9router:latest
     container_name: 9router
     restart: unless-stopped
+    depends_on:
+      copilot-anthropic:
+        condition: service_healthy
     volumes:
       - 9router-data:/app/data
     environment:
