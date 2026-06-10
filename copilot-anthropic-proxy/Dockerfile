@@ -10,7 +10,7 @@ COPY models.conf ./
 
 EXPOSE 4142
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD wget --spider -q http://localhost:4142/health || exit 1
+  CMD wget --spider -q http://127.0.0.1:4142/health || exit 1
 
 ENTRYPOINT []
 CMD ["bun", "run", "src/index.ts"]
