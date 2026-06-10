@@ -23,7 +23,7 @@ Claude Code CLI
 
 ## 可用模型
 
-模型由 [`providers.json`](providers.json) 定义，默认包含：
+模型由 `.env` 中的 `PROVIDER_<N>_*` 变量定义，默认包含：
 
 | 前缀 | 模型 ID | 来源 |
 |------|--------|------|
@@ -32,7 +32,7 @@ Claude Code CLI
 | `ds/` | `deepseek-v4-pro` | 任意 Anthropic API |
 | `ds/` | `deepseek-v4-flash` | 任意 Anthropic API |
 
-> 添加新 provider 只需编辑 `providers.json`，重新运行 `podman compose up -d` 即可。
+> 添加新 provider 只需在 `.env` 中增加 `PROVIDER_3_*` 等变量，重新运行 `podman compose up -d` 即可。
 
 ## 前置条件
 
@@ -56,10 +56,20 @@ cd OneCCRouter
 cp .env.example .env
 ```
 
-编辑 `.env`，按 `providers.json` 中 `apiKeyEnv` 字段填入对应的 Key：
+编辑 `.env`，按 `PROVIDER_<N>_*` 格式填入配置：
 
 ```env
-PROVIDER_DS_KEY=sk-xxxxxxxx
+PROVIDER_1_NAME=Copilot Claude
+PROVIDER_1_PREFIX=cp
+PROVIDER_1_BASE_URL=http://copilot-anthropic:4142
+PROVIDER_1_API_KEY=not-needed
+PROVIDER_1_MODELS=claude-opus-4.8,claude-fable-5
+
+PROVIDER_2_NAME=DeepSeek
+PROVIDER_2_PREFIX=ds
+PROVIDER_2_BASE_URL=https://api.deepseek.com/anthropic
+PROVIDER_2_API_KEY=sk-your-key-here
+PROVIDER_2_MODELS=deepseek-v4-pro,deepseek-v4-flash
 ```
 
 ### 3. 获取 GitHub Copilot Token
@@ -106,19 +116,17 @@ curl -X POST http://localhost:3456/v1/messages \
 
 ## 自定义 Provider
 
-编辑 `providers.json` 添加新的 Anthropic-compatible API：
+在 `.env` 中追加新的 `PROVIDER_<N>_*` 变量：
 
-```json
-{
-  "name": "My Provider",
-  "prefix": "my",
-  "baseUrl": "https://my-api.example.com/anthropic",
-  "apiKeyEnv": "PROVIDER_MY_KEY",
-  "models": ["model-a", "model-b"]
-}
+```env
+PROVIDER_3_NAME=My API
+PROVIDER_3_PREFIX=my
+PROVIDER_3_BASE_URL=https://my-api.example.com/anthropic
+PROVIDER_3_API_KEY=sk-xxx
+PROVIDER_3_MODELS=model-a,model-b
 ```
 
-然后在 `.env` 中填入 Key，重新启动即可。
+重新运行 `podman compose up -d` 即可注册新 provider。
 
 ## 管理
 
@@ -129,7 +137,7 @@ podman compose ps
 # 查看日志
 podman compose logs -f
 
-# 重启（修改 providers.json 后）
+# 重启（修改 .env 后）
 podman compose up -d
 ```
 
@@ -149,10 +157,9 @@ podman compose up -d
 │   ├── github_token           # Copilot 设备 token（gitignore）
 │   ├── Dockerfile
 │   └── package.json
-├── providers.json             # 所有 Anthropic provider 配置（单一数据源）
 ├── docker-compose.yml         # 容器编排
 ├── register-providers.sh      # 自动注册 + 生成 Claude Code 配置
 ├── out/                       # 生成的配置文件（gitignore）
-├── .env.example               # 环境变量模板
-└── .env                       # API Keys（gitignore）
+├── .env.example               # Provider 配置模板
+└── .env                       # Provider 配置 + API Keys（gitignore）
 ```

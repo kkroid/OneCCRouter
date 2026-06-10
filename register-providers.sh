@@ -4,12 +4,35 @@ set -e
 echo "=== Registering Providers ==="
 
 bun -e "
-import { readFileSync, writeFileSync } from 'fs';
+import { writeFileSync } from 'fs';
 
 const API = 'http://9router:3456/api';
-const providers = JSON.parse(readFileSync('/providers.json', 'utf-8'));
-let cookie = '';
 
+// Parse PROVIDER_<N>_<FIELD> from env
+const providers = [];
+const prefix = 'PROVIDER_';
+for (const [k, v] of Object.entries(process.env)) {
+  if (!k.startsWith(prefix)) continue;
+  const m = k.match(/^PROVIDER_(\d+)_(.+)$/);
+  if (!m) continue;
+  const idx = parseInt(m[1]) - 1;
+  const field = m[2].toLowerCase();
+  if (!providers[idx]) providers[idx] = {};
+  providers[idx][field] = v;
+}
+
+// Filter empty, parse models
+const list = providers.filter(Boolean).map(p => ({
+  ...p,
+  models: (p.models || '').split(',').map(s => s.trim()).filter(Boolean)
+}));
+
+if (list.length === 0) {
+  console.error('No providers found in env. Expected PROVIDER_1_NAME etc.');
+  process.exit(1);
+}
+
+let cookie = '';
 async function api(method, url, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (cookie) headers['Cookie'] = cookie;
@@ -31,7 +54,7 @@ await post(API + '/auth/login', { password: '123456' });
 
 // Delete old nodes
 const existing = await get(API + '/provider-nodes');
-const knownPrefixes = providers.map(p => p.prefix);
+const knownPrefixes = list.map(p => p.prefix);
 if (existing?.nodes) {
   for (const n of existing.nodes) {
     if (knownPrefixes.includes(n.prefix)) {
@@ -43,28 +66,27 @@ if (existing?.nodes) {
 
 // Register each provider
 const models = [];
-for (const p of providers) {
+for (const p of list) {
   const r = await post(API + '/provider-nodes', {
     name: p.name,
     prefix: p.prefix,
-    baseUrl: p.baseUrl,
+    baseUrl: p.baseurl,
     type: 'anthropic-compatible'
   });
   console.log(p.prefix + ' node:', JSON.stringify(r.data));
 
   const nodeId = r.data?.node?.id;
   if (nodeId) {
-    const apiKey = p.apiKey || (p.apiKeyEnv ? (process.env[p.apiKeyEnv] || '') : '');
     const c = await post(API + '/providers', {
       provider: nodeId,
       name: p.name,
-      apiKey,
+      apiKey: p.apikey || '',
       label: p.name
     });
     console.log(p.prefix + ' conn:', c.ok ? 'OK' : 'FAIL');
   }
 
-  for (const m of (p.models || [])) {
+  for (const m of p.models) {
     models.push({ id: p.prefix + '/' + m, name: p.name + ' ' + m });
   }
 }

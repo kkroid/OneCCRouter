@@ -56,7 +56,6 @@ services:
       - .env
     volumes:
       - ./register-providers.sh:/register.sh:ro
-      - ./providers.json:/providers.json:ro
       - ./out:/out
     entrypoint: ["/bin/sh", "/register.sh"]
     networks:
