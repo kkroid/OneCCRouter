@@ -43,6 +43,19 @@ async function loadModelList() {
 app.get("/", (c) => c.text("OneCC Proxy — OK"));
 app.get("/health", (c) => c.json({ status: "ok" }));
 
+// Debug: list Copilot API models
+app.get("/debug/copilot-models", async (c) => {
+  try {
+    const token = await getToken();
+    const url = `${getApiBase()}/models`;
+    const res = await fetch(url, {
+      headers: { "Authorization": `Bearer ${token}`, "User-Agent": "GitHubCopilotChat/0.26.7" },
+    });
+    const text = await res.text();
+    return c.json({ apiBase: getApiBase(), status: res.status, body: text.slice(0, 500) });
+  } catch (e: any) { return c.json({ error: e.message }, 500); }
+});
+
 app.get("/v1/models", (c) => c.json({
   object: "list",
   data: getAllModelIds().map(id => ({ id, object: "model", created: 1, owned_by: "router" })),
