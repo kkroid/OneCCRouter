@@ -47,12 +47,11 @@ app.get("/health", (c) => c.json({ status: "ok" }));
 app.get("/debug/copilot-models", async (c) => {
   try {
     const token = await getToken();
-    const url = `${getApiBase()}/models`;
-    const res = await fetch(url, {
-      headers: { "Authorization": `Bearer ${token}`, "User-Agent": "GitHubCopilotChat/0.26.7" },
+    const res = await fetch(`${getApiBase()}/models`, {
+      headers: { ...BASE_HEADERS, "Authorization": `Bearer ${token}` },
     });
     const text = await res.text();
-    return c.json({ apiBase: getApiBase(), status: res.status, body: text.slice(0, 500) });
+    return c.json({ apiBase: getApiBase(), status: res.status, body: text.slice(0, 3000) });
   } catch (e: any) { return c.json({ error: e.message }, 500); }
 });
 
