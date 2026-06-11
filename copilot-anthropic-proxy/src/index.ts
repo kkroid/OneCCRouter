@@ -43,18 +43,6 @@ async function loadModelList() {
 app.get("/", (c) => c.text("OneCC Proxy — OK"));
 app.get("/health", (c) => c.json({ status: "ok" }));
 
-// Debug: list Copilot API models
-app.get("/debug/copilot-models", async (c) => {
-  try {
-    const token = await getToken();
-    const res = await fetch(`${getApiBase()}/models`, {
-      headers: { ...BASE_HEADERS, "Authorization": `Bearer ${token}` },
-    });
-    const text = await res.text();
-    return c.json({ apiBase: getApiBase(), status: res.status, body: text.slice(0, 3000) });
-  } catch (e: any) { return c.json({ error: e.message }, 500); }
-});
-
 app.get("/v1/models", (c) => c.json({
   object: "list",
   data: getAllModelIds().map(id => ({ id, object: "model", created: 1, owned_by: "router" })),
@@ -163,7 +151,7 @@ async function main() {
     try {
       await deviceLogin();
     } catch (e: any) {
-      console.log("⚠ 自动登录失败:", e.message || e.cause || e);
+      console.log("⚠ 自动登录失败:", e.message);
       console.log("   手动获取 token:");
       console.log("   podman run --rm -it -v ./copilot-anthropic-proxy/github_token:/root/.local/share/copilot-api/github_token ghcr.io/ericc-ch/copilot-api:latest bun run auth.js\n");
     }

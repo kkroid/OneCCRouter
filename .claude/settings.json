@@ -1,0 +1,63 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(podman *)",
+      "Bash(docker *)",
+      "Bash(curl *)",
+      "Bash(git *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(file *)",
+      "Bash(du *)",
+      "Bash(mkdir *)",
+      "Bash(rm *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(cd *)",
+      "Bash(which *)",
+      "Bash(echo *)",
+      "Bash(wget *)",
+      "Bash(env *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(tsx *)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "WebSearch(*)",
+      "WebFetch(*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~/*)",
+      "Bash(rm -rf ./*)",
+      "Bash(git push --force origin main)",
+      "Bash(git push --force origin master)",
+      "Bash(> /dev/sda*)",
+      "Bash(dd if=*)",
+      "Bash(chmod 777 *)",
+      "Bash(docker system prune *)",
+      "Bash(podman system prune *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export HTTP_PROXY=\"${HTTP_PROXY:-socks5h://127.0.0.1:1082}\" && export HTTPS_PROXY=\"${HTTPS_PROXY:-socks5h://127.0.0.1:1082}\""
+          }
+        ]
+      }
+    ]
+  }
+}

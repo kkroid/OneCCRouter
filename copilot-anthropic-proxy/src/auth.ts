@@ -65,8 +65,6 @@ export async function checkTokenAvailable(): Promise<boolean> {
 // ---- Device login ----
 export async function deviceLogin(): Promise<string> {
   const tokenFile = process.env.GITHUB_TOKEN_FILE!;
-  const proxy = process.env.https_proxy || process.env.http_proxy || "none";
-  console.log("   proxy:", proxy);
 
   const res1 = await fetch("https://github.com/login/device/code", {
     method: "POST",
