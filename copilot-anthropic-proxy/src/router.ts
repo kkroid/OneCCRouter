@@ -14,26 +14,27 @@ let providers: Provider[] = [];
 let modelMap = new Map<string, Provider>(); // "cp/claude-opus-4.8" → Provider
 
 // ---------- Env parsing ----------
+// Format: PROVIDER_<PREFIX>_<FIELD>  e.g. PROVIDER_DS_BASE_URL
 export function parseProviders(): Provider[] {
-  const list: Record<number, Partial<Provider>> = {};
+  const group: Record<string, any> = {};
   for (const [k, v] of Object.entries(process.env)) {
-    const m = k.match(/^PROVIDER_(\d+)_(.+)$/);
+    const m = k.match(/^PROVIDER_([A-Z0-9]+)_(.+)$/);
     if (!m) continue;
-    const idx = parseInt(m[1]) - 1;
+    const prefix = m[1].toLowerCase();
     const field = m[2].toLowerCase();
-    if (!list[idx]) list[idx] = {};
-    (list[idx] as any)[field] = v;
+    if (!group[prefix]) group[prefix] = { prefix };
+    group[prefix][field] = v;
   }
 
   const result: Provider[] = [];
-  for (const p of Object.values(list).filter(Boolean)) {
-    if (!p.name || !p.prefix) continue;
+  for (const p of Object.values(group)) {
+    if (!p.models) continue;
     result.push({
-      name: p.name,
+      name: p.name || p.prefix.toUpperCase(),
       prefix: p.prefix,
       baseUrl: p.base_url || "",
       apiKey: p.api_key || "",
-      models: (p.models || "").split(",").map(s => s.trim()).filter(Boolean),
+      models: (p.models || "").split(",").map((s: string) => s.trim()).filter(Boolean),
     });
   }
 
