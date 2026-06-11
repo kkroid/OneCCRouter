@@ -4,7 +4,7 @@ import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
 import { readFile } from "node:fs/promises";
 
-import { getToken, getApiBase } from "./auth";
+import { getToken, getApiBase, deviceLogin } from "./auth";
 import {
   translateRequest, translateResponse, translateStreamChunk,
   setAllowedModels, type StreamContext,
@@ -141,10 +141,7 @@ async function main() {
   await loadModelList();
 
   if (await requiresToken()) {
-    console.log("\n❌ GitHub Copilot 需要设备 token，但未找到。");
-    console.log("   运行以下命令完成登录后重新启动：");
-    console.log("   podman run --rm -it -v ./copilot-anthropic-proxy/github_token:/root/.local/share/copilot-api/github_token ghcr.io/ericc-ch/copilot-api:latest bun run auth.js\n");
-    process.exit(1);
+    await deviceLogin();
   }
 
   generateSettings(OUT_DIR);
