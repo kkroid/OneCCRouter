@@ -69,10 +69,8 @@ export async function deviceLogin(): Promise<string> {
   const res1 = await fetch("https://github.com/login/device/code", {
     method: "POST",
     headers: { "Accept": "application/json", "User-Agent": UA },
-    body: new URLSearchParams({
-      client_id: COPILOT_CLIENT_ID,
-      scope: "read:user",
-    }),
+    body: new URLSearchParams({ client_id: COPILOT_CLIENT_ID, scope: "read:user" }),
+    signal: AbortSignal.timeout(10000),
   });
   if (!res1.ok) throw new Error(`Device code request failed: ${res1.status}`);
   const dc = await res1.json() as { device_code: string; user_code: string; verification_uri: string; interval: number };

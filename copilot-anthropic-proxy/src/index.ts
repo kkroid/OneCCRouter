@@ -140,16 +140,25 @@ async function main() {
 
   await loadModelList();
 
-  if (await requiresToken()) {
-    await deviceLogin();
-  }
-
-  generateSettings(OUT_DIR);
-
+  // Start server immediately, don't block on auth
   serve({ fetch: app.fetch, port: PORT }, (info) => {
     console.log(`\n🚀 OneCC Proxy → http://localhost:${info.port}`);
     console.log(`   /v1/messages  |  /health  |  /v1/models\n`);
   });
+
+  // Background: auto device login if needed
+  if (await requiresToken()) {
+    try {
+      await deviceLogin();
+      generateSettings(OUT_DIR);
+    } catch (e: any) {
+      console.log("⚠ 自动登录失败:", e.message);
+      console.log("   Copilot 模型暂时不可用。手动获取 token:");
+      console.log("   podman run --rm -it -v ./copilot-anthropic-proxy/github_token:/root/.local/share/copilot-api/github_token ghcr.io/ericc-ch/copilot-api:latest bun run auth.js\n");
+    }
+  } else {
+    generateSettings(OUT_DIR);
+  }
 }
 
 main();
