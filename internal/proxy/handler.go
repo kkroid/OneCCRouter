@@ -32,6 +32,7 @@ type Handler struct {
 	TokenManager *auth.TokenManager
 	HTTPClient   *http.Client
 	Logger       *slog.Logger
+	ErrorHook    func(title, msg string) // called on 5xx/429 errors (optional)
 }
 
 // NewHandler creates a proxy Handler.
@@ -319,9 +320,16 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, status int, message string) {
-	// Track error in request metadata
 	if tw, ok := w.(*ttfbWriter); ok && tw.meta != nil {
 		tw.meta.Error = message
+	}
+	// Popup for critical upstream errors
+	if h.ErrorHook != nil && (status >= 500 || status == 429) {
+		title := "OneCCRouter"
+		if strings.Contains(message, "copilot") || strings.Contains(message, "token") {
+			title = "Copilot Error"
+		}
+		h.ErrorHook(title, message)
 	}
 	h.writeJSON(w, status, map[string]interface{}{
 		"error": map[string]interface{}{

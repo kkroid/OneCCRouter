@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -23,13 +24,15 @@ import (
 
 	"github.com/kkroid/onecc-router/internal/proxy"
 	"github.com/kkroid/onecc-router/internal/router"
+	"github.com/kkroid/onecc-router/internal/ui"
 	"github.com/spf13/cobra"
 )
 
 var (
 	cfgFile string
 	pidFile string
-	daemon  bool
+	daemon   bool
+	noPidLock bool
 	version string // set via ldflags: -X main.version=1.0.0
 )
 
@@ -62,7 +65,8 @@ Anthropic-compatible APIs behind a single Anthropic Messages API endpoint.`,
 
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path (default: onecc-router.yaml next to exe)")
 	rootCmd.PersistentFlags().StringVar(&pidFile, "pid", "", "pid file path (default ~/.onecc/onecc-router.pid)")
-	rootCmd.PersistentFlags().BoolVarP(&daemon, "daemon", "d", false, "run in background (detach from terminal)")
+	rootCmd.PersistentFlags().BoolVarP(&daemon, "daemon", "d", false, "run in background")
+	rootCmd.PersistentFlags().BoolVar(&noPidLock, "no-pid", false, "allow multiple instances (skip PID lock)")
 
 	rootCmd.AddCommand(statusCmd())
 	rootCmd.AddCommand(&cobra.Command{
@@ -98,8 +102,10 @@ func serveCmd() *cobra.Command {
 				pidPath = filepath.Join(config.DefaultOneccDir(), "onecc-router.pid")
 			}
 			os.MkdirAll(filepath.Dir(pidPath), 0755)
-			if existing, err := os.ReadFile(pidPath); err == nil {
-				return fmt.Errorf("已在运行 (PID %s)\n  如需重启，先停止旧进程或删除 %s", strings.TrimSpace(string(existing)), pidPath)
+			if !noPidLock {
+				if existing, err := os.ReadFile(pidPath); err == nil {
+				return fmt.Errorf("已在运行 (PID %s)\n  如需多实例: --no-pid %s", strings.TrimSpace(string(existing)), pidPath)
+			}
 			}
 			os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
 			defer os.Remove(pidPath)
@@ -136,6 +142,7 @@ func serveCmd() *cobra.Command {
 			}
 
 			proxyHandler := proxy.NewHandler(resolver, tokenMgr, httpClient, logger)
+			proxyHandler.ErrorHook = ui.ErrorNotify
 
 			logger.Info("onecc-router starting",
 				"version", version,
@@ -166,10 +173,22 @@ func serveCmd() *cobra.Command {
 				}
 			}()
 
-			sigCh := make(chan os.Signal, 1)
-			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-			sig := <-sigCh
-			logger.Info("received signal, shutting down", "signal", sig)
+			// Shutdown coordination: tray or signal
+			doneCh := make(chan struct{})
+			once := new(sync.Once)
+			stop := func() { once.Do(func() { close(doneCh) }) }
+
+			go ui.NewTray(cfg.Server.HTTPPort, nil, stop).Run()
+
+			go func() {
+				sigCh := make(chan os.Signal, 1)
+				signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+				<-sigCh
+				stop()
+			}()
+
+			<-doneCh
+			logger.Info("shutting down")
 
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
