@@ -1,0 +1,47 @@
+# OneCCRouter 完整配置文件
+# 复制为 onecc-router.yaml 并修改
+
+server:
+  host: "127.0.0.1"
+  http_port: 3456        # Anthropic Messages API
+
+log:
+  level: "info"           # debug, info, warn, error
+  dir: "~/.onecc/logs"    # 日志目录，按日期滚动
+  max_age_days: 30         # 保留天数
+
+proxy:
+  socks5: "127.0.0.1:1082"
+
+providers:
+  - name: "GitHub Copilot"
+    prefix: "cp"
+    # cp 前缀内置处理，无需 base_url 和真实 api_key（OAuth 登录）
+    api_key: "not-needed"
+    models:
+      - "claude-opus-4.8"
+      - "claude-fable-5"
+
+  - name: "DeepSeek"
+    prefix: "ds"
+    base_url: "https://api.deepseek.com/anthropic"
+    api_key: "sk-your-deepseek-key"
+    models:
+      - "deepseek-v4-pro[1m]"
+      - "deepseek-v4-flash[1m]"
+
+  # 添加更多 provider：
+  # - name: "My API"
+  #   prefix: "my"
+  #   base_url: "https://my-api.example.com/anthropic"
+  #   api_key: "sk-xxx"
+  #   models: ["model-a", "model-b"]
+
+# Claude Code 模型槽位 — 每个槽位指定 provider_prefix/model
+# 启动时打印到控制台，复制到 Claude Code settings.json 即可
+model_slots:
+  default: "ds/deepseek-v4-pro[1m]"
+  opus: "cp/claude-opus-4.8"
+  sonnet: "ds/deepseek-v4-pro[1m]"
+  haiku: "ds/deepseek-v4-flash[1m]"
+  fable: "cp/claude-fable-5"

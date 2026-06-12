@@ -1,12 +1,11 @@
-# 密钥与环境变量 (含 API Key)
-.env
+# 正式配置文件 (含 API Key)
+onecc-router.yaml
 
-# 生成的输出文件
-out/*
-!out/.gitkeep
+# 编译产物
+dist/
 
-# GitHub Copilot token
-copilot-anthropic-proxy/github_token
+# 运行时数据
+~/.onecc/
 
 # 依赖
 node_modules/
@@ -25,3 +24,4 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+dist/

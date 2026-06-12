@@ -1,0 +1,404 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"golang.org/x/sys/windows/registry"
+
+	"github.com/kkroid/onecc-router/internal/auth"
+	"github.com/kkroid/onecc-router/internal/config"
+	oneccLog "github.com/kkroid/onecc-router/internal/log"
+	netproxy "golang.org/x/net/proxy"
+
+	"github.com/kkroid/onecc-router/internal/proxy"
+	"github.com/kkroid/onecc-router/internal/router"
+	"github.com/spf13/cobra"
+)
+
+var (
+	cfgFile string
+	pidFile string
+	daemon  bool
+	version string // set via ldflags: -X main.version=1.0.0
+)
+
+func init() {
+	if version == "" {
+		version = "dev"
+	}
+}
+
+func main() {
+	rootCmd := &cobra.Command{
+		Use:   "onecc-router",
+		Short: "OneCCRouter — AI model proxy gateway",
+		Long: `OneCCRouter unifies GitHub Copilot Claude models and arbitrary
+Anthropic-compatible APIs behind a single Anthropic Messages API endpoint.`,
+		Version: version,
+		RunE:    serveCmd().RunE,
+	}
+
+	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "onecc-router.yaml", "config file path")
+	rootCmd.PersistentFlags().StringVar(&pidFile, "pid", "", "pid file path (default ~/.onecc/onecc-router.pid)")
+	rootCmd.PersistentFlags().BoolVarP(&daemon, "daemon", "d", false, "run in background (detach from terminal)")
+
+	rootCmd.AddCommand(statusCmd())
+	rootCmd.AddCommand(&cobra.Command{
+		Use: "version", Short: "Print version",
+		Run: func(cmd *cobra.Command, args []string) { fmt.Println(version) },
+	})
+	rootCmd.AddCommand(installCmd())
+	rootCmd.AddCommand(uninstallCmd())
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func serveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "serve",
+		Short: "Start the proxy daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(cfgFile)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			if err := cfg.Validate(); err != nil {
+				return fmt.Errorf("配置校验失败: %w", err)
+			}
+
+			// PID file
+			pidPath := pidFile
+			if pidPath == "" {
+				pidPath = filepath.Join(config.DefaultOneccDir(), "onecc-router.pid")
+			}
+			os.MkdirAll(filepath.Dir(pidPath), 0755)
+			if existing, err := os.ReadFile(pidPath); err == nil {
+				return fmt.Errorf("已在运行 (PID %s)\n  如需重启，先停止旧进程或删除 %s", strings.TrimSpace(string(existing)), pidPath)
+			}
+			os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
+			defer os.Remove(pidPath)
+
+			logCfg := oneccLog.FromConfig(cfg.Log.Level, cfg.Log.Dir, cfg.Log.MaxAgeDays)
+			logger, cleanup, err := oneccLog.Setup(logCfg)
+			if err != nil {
+				return fmt.Errorf("setup logger: %w", err)
+			}
+			defer cleanup()
+
+			providers := router.FromConfig(cfg.Providers)
+			resolver := router.NewResolver(providers)
+
+			proxyAddr := cfg.Proxy.Socks5
+			httpClient, err := makeHTTPClient(proxyAddr)
+			if err != nil {
+				return fmt.Errorf("create http client: %w", err)
+			}
+
+			tokenFile := config.DefaultTokenFile()
+			tokenMgr, err := auth.NewTokenManager(tokenFile, proxyAddr)
+			if err != nil {
+				return fmt.Errorf("create token manager: %w", err)
+			}
+
+			// Force login if cp configured but no token
+			if resolver.CopilotProvider() != nil && !tokenMgr.CheckTokenAvailable() {
+				fmt.Fprint(os.Stderr, "\n🔑 Copilot 未授权，请先登录:\n")
+				if err := tokenMgr.DeviceLogin(); err != nil {
+					return fmt.Errorf("登录失败: %w", err)
+				}
+				fmt.Fprint(os.Stderr, "✅ 登录成功，启动服务...\n")
+			}
+
+			proxyHandler := proxy.NewHandler(resolver, tokenMgr, httpClient, logger)
+
+			logger.Info("onecc-router starting",
+				"version", version,
+				"http_port", cfg.Server.HTTPPort,
+				"providers", len(providers),
+				"models", len(resolver.AllModelIDs()),
+			)
+
+			fmt.Fprintf(os.Stderr, "HTTP: http://%s:%d  |  %d providers, %d models\n",
+				cfg.Server.Host, cfg.Server.HTTPPort, len(providers), len(resolver.AllModelIDs()))
+
+			printClaudeCodeSettings(cfg)
+
+			if daemon {
+				detachFromTerminal()
+			}
+
+			mux := http.NewServeMux()
+			registerRoutes(mux, resolver, proxyHandler, tokenMgr, cfg, logger)
+
+			httpAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.HTTPPort)
+			httpServer := &http.Server{Addr: httpAddr, Handler: withRequestID(mux, logger)}
+
+			go func() {
+				logger.Info("HTTP server listening", "addr", httpAddr)
+				if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					logger.Error("HTTP server error", "error", err)
+				}
+			}()
+
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			sig := <-sigCh
+			logger.Info("received signal, shutting down", "signal", sig)
+
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := httpServer.Shutdown(shutdownCtx); err != nil {
+				logger.Error("HTTP shutdown error", "error", err)
+			}
+
+			logger.Info("onecc-router stopped")
+			return nil
+		},
+	}
+}
+
+func statusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Check daemon status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(cfgFile)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			reqClient := &http.Client{Timeout: 3 * time.Second}
+			url := fmt.Sprintf("http://%s:%d/health", cfg.Server.Host, cfg.Server.HTTPPort)
+			resp, err := reqClient.Get(url)
+			if err != nil {
+				fmt.Println("未运行")
+				fmt.Println("启动: onecc-router")
+				return nil
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode == 200 {
+				fmt.Println("运行中:", url)
+				modelsURL := fmt.Sprintf("http://%s:%d/v1/models", cfg.Server.Host, cfg.Server.HTTPPort)
+				if r2, err := http.Get(modelsURL); err == nil {
+					defer r2.Body.Close()
+					body := make([]byte, 4096)
+					n, _ := r2.Body.Read(body)
+					fmt.Printf("Models: %s\n", string(body[:n]))
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func registerRoutes(mux *http.ServeMux, resolver *router.Resolver, proxyHandler *proxy.Handler, tokenMgr *auth.TokenManager, cfg *config.Config, logger *slog.Logger) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("OneCC Proxy — OK"))
+	})
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		health := map[string]interface{}{
+			"status":        "ok",
+			"models":        len(resolver.AllModelIDs()),
+			"copilot_token": tokenMgr.CheckTokenAvailable(),
+			"http_port":     cfg.Server.HTTPPort,
+			"version":       version,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(health)
+	})
+
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		type modelEntry struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			OwnedBy string `json:"owned_by"`
+		}
+		var models []modelEntry
+		for _, id := range resolver.AllModelIDs() {
+			models = append(models, modelEntry{ID: id, Object: "model", Created: 1, OwnedBy: "router"})
+		}
+		if models == nil {
+			models = []modelEntry{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"object": "list", "data": models})
+	})
+
+	mux.Handle("/v1/messages", withPanicRecover(proxyHandler, logger))
+	mux.Handle("/messages", withPanicRecover(proxyHandler, logger))
+}
+
+func printClaudeCodeSettings(cfg *config.Config) {
+	slots := cfg.ModelSlots
+	settings := map[string]interface{}{
+		"env": map[string]string{
+			"ANTHROPIC_BASE_URL":             fmt.Sprintf("http://localhost:%d", cfg.Server.HTTPPort),
+			"ANTHROPIC_AUTH_TOKEN":           "x",
+			"ANTHROPIC_MODEL":                slots.Default,
+			"ANTHROPIC_DEFAULT_OPUS_MODEL":   slots.Opus,
+			"ANTHROPIC_DEFAULT_SONNET_MODEL": slots.Sonnet,
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL":  slots.Haiku,
+			"ANTHROPIC_DEFAULT_FABLE_MODEL":  slots.Fable,
+		},
+		"theme":                    "dark",
+		"skipWorkflowUsageWarning": true,
+	}
+
+	out, _ := json.MarshalIndent(settings, "", "  ")
+	fmt.Println()
+	fmt.Println(string(out))
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *statusWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func withRequestID(next http.Handler, logger *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ctx := oneccLog.WithRequestID(r.Context())
+		meta := &oneccLog.RequestMeta{}
+		meta.MarkStart()
+		ctx = oneccLog.WithRequestMeta(ctx, meta)
+		requestID := oneccLog.RequestIDFromContext(ctx)
+
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(sw, r.WithContext(ctx))
+
+		meta = oneccLog.RequestMetaFromContext(ctx)
+		attrs := []any{
+			"request_id", requestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+		}
+		if meta.Model != "" {
+			attrs = append(attrs, "model", meta.Model, "provider", meta.Provider, "stream", meta.Stream)
+		}
+		if meta.TTFBMs > 0 {
+			attrs = append(attrs, "ttfb_ms", meta.TTFBMs)
+		}
+		if meta.Error != "" {
+			attrs = append(attrs, "error", meta.Error)
+		}
+		logger.Info("request", attrs...)
+	})
+}
+
+func withPanicRecover(next http.Handler, logger *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				logger.Error("panic in handler",
+					"request_id", oneccLog.RequestIDFromContext(r.Context()),
+					"error", fmt.Sprintf("%v", err),
+				)
+				http.Error(w, `{"error":{"type":"internal","message":"internal server error"}}`, http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func detachFromTerminal() {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	freeConsole := kernel32.NewProc("FreeConsole")
+	freeConsole.Call()
+	os.Stdin.Close()
+}
+
+func makeHTTPClient(proxyAddr string) (*http.Client, error) {
+	transport := &http.Transport{
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	if proxyAddr != "" {
+		dialer, err := netproxy.SOCKS5("tcp", proxyAddr, nil, netproxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("socks5 dialer: %w", err)
+		}
+		transport.DialContext = dialer.(netproxy.ContextDialer).DialContext
+	}
+	return &http.Client{Transport: transport, Timeout: 120 * time.Second}, nil
+}
+
+func installCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install",
+		Short: "Register auto-start with Windows",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			exePath, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("get exe path: %w", err)
+			}
+			k, err := registry.OpenKey(registry.CURRENT_USER,
+				`Software\Microsoft\Windows\CurrentVersion\Run`,
+				registry.SET_VALUE)
+			if err != nil {
+				return fmt.Errorf("open registry: %w", err)
+			}
+			defer k.Close()
+			cmdLine := fmt.Sprintf(`"%s" --daemon`, exePath)
+			if cfgFile != "onecc-router.yaml" {
+				cmdLine += fmt.Sprintf(` --config "%s"`, cfgFile)
+			}
+			if err := k.SetStringValue("OneCCRouter", cmdLine); err != nil {
+				return fmt.Errorf("set registry: %w", err)
+			}
+			fmt.Println("✅ 已注册开机启动")
+			fmt.Printf("   命令: %s\n", cmdLine)
+			return nil
+		},
+	}
+}
+
+func uninstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove auto-start registration",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			k, err := registry.OpenKey(registry.CURRENT_USER,
+				`Software\Microsoft\Windows\CurrentVersion\Run`,
+				registry.SET_VALUE)
+			if err != nil {
+				return fmt.Errorf("open registry: %w", err)
+			}
+			defer k.Close()
+			if err := k.DeleteValue("OneCCRouter"); err != nil {
+				return fmt.Errorf("not registered (no registry key found)")
+			}
+			fmt.Println("✅ 已取消开机启动")
+			return nil
+		},
+	}
+}

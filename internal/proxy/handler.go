@@ -1,0 +1,360 @@
+package proxy
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/kkroid/onecc-router/internal/auth"
+	oneccLog "github.com/kkroid/onecc-router/internal/log"
+	"github.com/kkroid/onecc-router/internal/router"
+	"github.com/kkroid/onecc-router/internal/translate"
+)
+
+// Copilot HTTP headers required by the API.
+var copilotHeaders = map[string]string{
+	"copilot-integration-id":  "vscode-chat",
+	"user-agent":              "GitHubCopilotChat/0.26.7",
+	"editor-version":          "vscode/1.104.1",
+	"editor-plugin-version":   "copilot-chat/0.26.7",
+}
+
+// Handler dispatches Anthropic API requests to providers.
+type Handler struct {
+	Resolver     *router.Resolver
+	TokenManager *auth.TokenManager
+	HTTPClient   *http.Client
+	Logger       *slog.Logger
+}
+
+// NewHandler creates a proxy Handler.
+func NewHandler(resolver *router.Resolver, tokenMgr *auth.TokenManager, httpClient *http.Client, logger *slog.Logger) *Handler {
+	return &Handler{
+		Resolver:     resolver,
+		TokenManager: tokenMgr,
+		HTTPClient:   httpClient,
+		Logger:       logger,
+	}
+}
+
+// ServeHTTP implements the unified /v1/messages handler.
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Parse request body
+	var body translate.AnthropicRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+
+	fullModel := body.Model
+
+	// No model specified → use first Copilot model as default
+	if fullModel == "" {
+		cp := h.Resolver.CopilotProvider()
+		if cp != nil && len(cp.Models) > 0 {
+			h.copilotHandler(w, r, &body, cp.Models[0])
+			return
+		}
+		h.writeError(w, http.StatusBadRequest, "no model specified")
+		return
+	}
+
+	// Resolve model → provider
+	resolved := h.Resolver.Resolve(fullModel)
+	if resolved == nil {
+		models := h.Resolver.AllModelIDs()
+		h.writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("unknown model: %s. Available: %s", fullModel, strings.Join(models, ", ")))
+		return
+	}
+
+	// Attach request metadata to context for logging
+	meta := oneccLog.RequestMetaFromContext(r.Context())
+	meta.Model = fullModel
+	meta.Provider = resolved.Provider.Prefix
+	meta.Stream = body.Stream
+
+	// Track TTFB via response writer
+	w = &ttfbWriter{ResponseWriter: w, meta: meta}
+
+	if resolved.Provider.Prefix == "cp" {
+		h.copilotHandler(w, r, &body, resolved.Model)
+	} else {
+		h.externalHandler(w, r, &body, resolved)
+	}
+}
+
+// copilotHandler proxies requests to GitHub Copilot API.
+func (h *Handler) copilotHandler(w http.ResponseWriter, r *http.Request, body *translate.AnthropicRequest, model string) {
+	// Inject resolved model name
+	body.Model = model
+
+	openaiReq, err := translate.TranslateRequest(body)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "translate request: "+err.Error())
+		return
+	}
+
+	token, err := h.TokenManager.GetToken()
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "get token: "+err.Error())
+		return
+	}
+
+	apiBase := h.TokenManager.GetAPIBase()
+	url := apiBase + "/chat/completions"
+
+	reqBody, _ := json.Marshal(openaiReq)
+	timeout := 60 * time.Second
+	if body.Stream {
+		timeout = 300 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "create request: "+err.Error())
+		return
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range copilotHeaders {
+		req.Header.Set(k, v)
+	}
+
+	if !body.Stream {
+		// Non-streaming
+		resp, err := h.HTTPClient.Do(req)
+		if err != nil {
+			h.writeError(w, http.StatusBadGateway, "copilot api: "+err.Error())
+			return
+		}
+		defer resp.Body.Close()
+
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
+		if resp.StatusCode != 200 {
+			h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("copilot api error %d: %s", resp.StatusCode, string(respBody)))
+			return
+		}
+
+		var openaiResp translate.OpenAIResponse
+		if err := json.Unmarshal(respBody, &openaiResp); err != nil {
+			h.writeError(w, http.StatusInternalServerError, "parse copilot response: "+err.Error())
+			return
+		}
+
+		anthropicResp := translate.TranslateResponse(&openaiResp, body.Model)
+		h.writeJSON(w, http.StatusOK, anthropicResp)
+		return
+	}
+
+	// Streaming
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := h.HTTPClient.Do(req)
+	if err != nil {
+		h.writeError(w, http.StatusBadGateway, "copilot api stream: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("copilot api stream error %d: %s", resp.StatusCode, string(respBody)))
+		return
+	}
+
+	h.streamCopilotResponse(w, resp.Body, body.Model)
+}
+
+// streamCopilotResponse translates an OpenAI SSE stream to Anthropic SSE.
+func (h *Handler) streamCopilotResponse(w http.ResponseWriter, body io.Reader, model string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		h.writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	ctx := &translate.StreamContext{
+		MessageStartSent: false,
+		MessageID:        translate.GenerateMessageID(),
+		Model:            model,
+		ContentBlockIdx:  0,
+		ContentBlockOpen: false,
+		ActiveToolIdx:    -1,
+		ToolCalls:        make(map[int]*translate.ToolCallState),
+	}
+
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 64*1024), 256*1024) // 64KB buffer
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk translate.OpenAIStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue // skip malformed chunks
+		}
+
+		events, err := translate.TranslateStreamChunk(&chunk, ctx)
+		if err != nil {
+			continue
+		}
+
+		for _, ev := range events {
+			evJSON, _ := json.Marshal(ev)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, evJSON)
+			flusher.Flush()
+		}
+	}
+}
+
+// externalHandler proxies requests to external Anthropic-compatible APIs (direct passthrough).
+func (h *Handler) externalHandler(w http.ResponseWriter, r *http.Request, body *translate.AnthropicRequest, resolved *router.ResolveResult) {
+	body.Model = resolved.Model
+
+	baseURL := strings.TrimRight(resolved.Provider.BaseURL, "/")
+	url := baseURL + "/messages"
+	apiKey := resolved.Provider.APIKey
+
+	reqBody, _ := json.Marshal(body)
+	timeout := 60 * time.Second
+	if body.Stream {
+		timeout = 300 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "create request: "+err.Error())
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+
+	if !body.Stream {
+		resp, err := h.HTTPClient.Do(req)
+		if err != nil {
+			h.writeError(w, http.StatusBadGateway, "external api: "+err.Error())
+			return
+		}
+		defer resp.Body.Close()
+
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if resp.StatusCode >= 400 {
+			h.writeError(w, resp.StatusCode, string(respBody))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(respBody)
+		return
+	}
+
+	// Streaming — direct SSE passthrough
+	resp, err := h.HTTPClient.Do(req)
+	if err != nil {
+		h.writeError(w, http.StatusBadGateway, "external api stream: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		h.writeError(w, resp.StatusCode, string(respBody))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" {
+			fmt.Fprintf(w, "%s\n", line)
+		} else {
+			fmt.Fprintf(w, "\n")
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
+// Helper methods
+
+func (h *Handler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func (h *Handler) writeError(w http.ResponseWriter, status int, message string) {
+	// Track error in request metadata
+	if tw, ok := w.(*ttfbWriter); ok && tw.meta != nil {
+		tw.meta.Error = message
+	}
+	h.writeJSON(w, status, map[string]interface{}{
+		"error": map[string]interface{}{
+			"type":    "api_error",
+			"message": message,
+		},
+	})
+}
+
+
+// ttfbWriter captures time-to-first-byte for logging.
+type ttfbWriter struct {
+	http.ResponseWriter
+	meta     *oneccLog.RequestMeta
+	firstWrite bool
+}
+
+func (tw *ttfbWriter) Write(b []byte) (int, error) {
+	if !tw.firstWrite {
+		tw.firstWrite = true
+		if tw.meta != nil {
+			tw.meta.MarkFirstByte()
+		}
+	}
+	return tw.ResponseWriter.Write(b)
+}
+
+func (tw *ttfbWriter) WriteHeader(code int) {
+	tw.ResponseWriter.WriteHeader(code)
+}
+
+func (tw *ttfbWriter) Flush() {
+	if f, ok := tw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
